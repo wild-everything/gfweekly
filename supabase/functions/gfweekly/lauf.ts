@@ -35,16 +35,58 @@ export function mailText(m: Any, max = 3500): string {
   const kopf = `Von: ${m.von || ''}\nAn: ${m.an || ''}\nDatum: ${m.datum || ''}\nBetreff: ${m.betreff || ''}\n`;
   return (kopf + '\n' + String(m.text || m.snippet || '').replace(/\r/g, '').replace(/\n{3,}/g, '\n\n')).slice(0, max);
 }
-/* Ein Belegsatz ist verankert, wenn er ein Datum, einen Betrag oder ein kennzeichnendes Wort (mindestens fünf Zeichen, großgeschrieben) aus Betreff
-   oder Text der Quelle enthält; allgemeine Sätze („Die Angelegenheit ist erledigt.“) reichen nicht (Runde 3, Befund 2). */
+function datumsAnker(text: string): string[] {
+  const aus: string[] = [];
+  for (const m of text.matchAll(/\b(?:(\d{4})-(\d{2})-(\d{2})|(\d{1,2})\.(\d{1,2})\.(\d{2,4})?)(?!\d)/g)) {
+    const jahr = m[1] || (m[6] ? String(Number(m[6]) + (m[6].length === 2 ? 2000 : 0)) : '');
+    const monat = Number(m[2] || m[5]), tag = Number(m[3] || m[4]);
+    const probe = new Date(Date.UTC(Number(jahr || 2000), monat - 1, tag));
+    aus.push(probe.getUTCMonth() + 1 === monat && probe.getUTCDate() === tag
+      ? `${jahr}:${monat}:${tag}` : 'ungueltig');
+  }
+  return aus;
+}
+function betragsAnker(text: string): string[] {
+  const aus: string[] = [];
+  for (const m of text.matchAll(/(?:^|[^\p{L}\p{N}.,+-])(?:(?:€|EUR\b|Euro\b)\s*([+-]?\d+(?:[.,]\d+|[ \u00a0\u202f]\d{3}(?!\d))*)|([+-]?\d+(?:[.,]\d+|[ \u00a0\u202f]\d{3}(?!\d))*)\s*(?:€|EUR\b|Euro\b))/giu)) {
+    const roh = m[1] || m[2]; const minus = roh.startsWith('-'); const z = roh.replace(/^[+-]/, '');
+    const pos = Math.max(z.lastIndexOf(','), z.lastIndexOf('.'));
+    const dezimal = pos >= 0 && z.length - pos - 1 === 2;
+    const ganz = dezimal ? z.slice(0, pos) : z; const cent = dezimal ? z.slice(pos + 1) : '00';
+    const gruppen = ganz.split(/[., \u00a0\u202f]/);
+    if (gruppen.slice(1).some(g => g.length !== 3) || (ganz.includes(',') && ganz.includes('.'))) { aus.push('ungueltig'); continue; }
+    const zahl = gruppen.join('').replace(/^0+(?=\d)/, '') + '.' + cent;
+    aus.push((minus && zahl !== '0.00' ? '-' : '') + zahl);
+  }
+  return aus;
+}
+/* Konkrete Datums- und Geldangaben müssen sämtlich in der Quelle vorkommen.
+   Ein gemeinsamer Name darf einen erfundenen Betrag nicht verdecken. Die Prüfung
+   belegt nur den Quellenanker, nicht den fachlichen Abschluss einer Handlung. */
 export function belegVerankert(beleg: string, quelle: { betreff?: string; text?: string; von?: string }): boolean {
   const b = String(beleg || '');
   if (b.length < 20) return false;
-  if (/\b(\d{1,2}\.\d{1,2}\.(\d{2,4})?|\d{4}-\d{2}-\d{2})\b/.test(b) || /\d[\d.,]*\s?(€|euro|eur)\b/i.test(b)) return true;
   const quelleText = `${quelle.betreff || ''} ${quelle.von || ''} ${quelle.text || ''}`;
+  const daten = datumsAnker(b), betraege = betragsAnker(b);
+  const quellDaten = new Set(datumsAnker(quelleText)), quellBetraege = new Set(betragsAnker(quelleText));
+  if (daten.some(d => d === 'ungueltig' || !quellDaten.has(d)) || betraege.some(g => g === 'ungueltig' || !quellBetraege.has(g))) return false;
+  if (daten.length || betraege.length) return true;
   const woerter = new Set((quelleText.match(/\b[A-ZÄÖÜ][\wäöüß-]{4,}\b/g) || []).map(w => w.toLowerCase()));
   const allgemein = new Set(['hallo', 'liebe', 'lieber', 'viele', 'grüße', 'danke', 'freundliche', 'sehr', 'geehrte', 'betreff', 'datum', 'alex', 'alexander', 'wilde', 'möhre', 'gmbh', 'festival']);
   return (b.match(/\b[A-ZÄÖÜ][\wäöüß-]{4,}\b/g) || []).some(w => woerter.has(w.toLowerCase()) && !allgemein.has(w.toLowerCase()));
+}
+
+function quellRef(m: Any): string {
+  return `${m.quelle_art === 'plattform' ? 'feed' : 'mail'}:${String(m.thread_id || '').slice(0, 80) || 'x'}:${String(m.message_id || '').slice(0, 80) || 'x'}`;
+}
+async function quellMetadaten(m: Any, fixture: boolean): Promise<Any> {
+  const bytes = new TextEncoder().encode(JSON.stringify([m.betreff || '', m.von || '', m.an || '', m.text || m.snippet || '', !!m.gesendet, m.datum || '', m.url || '']));
+  const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), x => x.toString(16).padStart(2, '0')).join('');
+  return { art: m.quelle_art === 'plattform' ? 'plattform' : 'mail', fixture,
+    thread_id: String(m.thread_id || '').slice(0, 200), message_id: String(m.message_id || '').slice(0, 200),
+    datum: m.datum && !isNaN(Date.parse(m.datum)) ? new Date(m.datum).toISOString() : '', hash,
+    feed_tabelle: String(m.feed_tabelle || ''), platform: String(m.platform || ''),
+    ref_table: String(m.ref_table || ''), ref_id: String(m.ref_id || '') };
 }
 export function istEinwurfMail(m: Any): boolean { const an = String(m.an || '').toLowerCase(); return EINWURF.some(e => an.includes(e)); }
 /* Selbstabschaltung (Stufe 4): zwei getrennte Wochen, jede mit mindestens drei Erledigungen und unter 50 % bleibend. */
@@ -102,6 +144,15 @@ export function laufModul(deps: { admin: Any; json: (b: Any, s?: number) => Resp
   }
 
   /* ---- Google: Dienstkonto mit domänenweiter Delegation, JWT mit WebCrypto, kein Schlüssel im Log ---- */
+  async function versuchLage(): Promise<Record<string, number>> {
+    const aus: Record<string, number> = {};
+    for (const status of ['wiederholen','wirkung_offen','erschoepft']) {
+      const { count, error } = await admin.from('hh_lauf_versuche').select('quelle_ref', { count: 'exact', head: true }).eq('status', status);
+      if (error) throw error;
+      aus[status] = count || 0;
+    }
+    return aus;
+  }
   function saLesen(): Any {
     const raw = (Deno.env.get('GOOGLE_SA_JSON') || '').trim();
     if (!raw) throw new LaufFehler('Google-Zugang fehlt: Supabase-Secret GOOGLE_SA_JSON setzen (Paket Stufe 3, Abschnitt 2.4)', 503);
@@ -141,21 +192,27 @@ export function laufModul(deps: { admin: Any; json: (b: Any, s?: number) => Resp
     return '';
   }
   /* Threads eines Postfachs im Fenster; je Thread die jüngste Nachricht als Quelle, der Threadtext (höchstens 3 Nachrichten) als Kontext. */
-  /* Schon protokollierte Threads (gleicher Modus oder ausgeführt) zählen nicht in den Stapel; `mehr` meldet, ob Gmail weitere Seiten hätte (Runde 3, Befund 1). */
+  function threadQuelle(th: Any, messageId?: string): Any {
+    const alle = th.messages || [];
+    const i = messageId ? alle.findIndex((m: Any) => m.id === messageId) : alle.length - 1;
+    if (i < 0) throw new LaufFehler('Reservierte Nachricht nicht mehr verfügbar', 409);
+    const msgs = alle.slice(Math.max(0, i - 2), i + 1), letzte = alle[i];
+    const h = letzte.payload?.headers || [];
+    const text = msgs.map((m: Any) => `[${kopf(m.payload?.headers, 'Date')}] ${kopf(m.payload?.headers, 'From')}: ${textTeil(m.payload).slice(0, 1500)}`).join('\n\n');
+    return { thread_id: th.id, message_id: letzte.id, von: kopf(h, 'From'), an: kopf(h, 'To') + (kopf(h, 'Cc') ? ', ' + kopf(h, 'Cc') : ''), betreff: kopf(h, 'Subject'), datum: new Date(Number(letzte.internalDate)).toISOString(),
+      text, gesendet: (letzte.labelIds || []).includes('SENT'), labels: letzte.labelIds || [], quelle_art: 'mail' };
+  }
+  /* Nur genau diese Nachricht überspringen. Eine spätere Nachricht desselben Threads bleibt neu. */
   async function gmailMails(postfach: string, q: string, max: number, schonDa: (ref: string) => Promise<boolean> = async () => false): Promise<Any[] & { mehr?: boolean }> {
     const liste = await gmailGet(postfach, `threads?maxResults=${Math.min(50, Math.max(max * 2, 10))}&q=${encodeURIComponent(q)}`);
     const aus: Any[] & { mehr?: boolean } = [];
     aus.mehr = !!liste.nextPageToken || (liste.threads || []).length > max;
     for (const t of (liste.threads || [])) {
       if (aus.length >= max) { aus.mehr = true; break; }
-      if (await schonDa(`mail:${t.id}:`)) continue;
       const th = await gmailGet(postfach, `threads/${t.id}?format=full`);
-      const msgs = (th.messages || []).slice(-3);
-      const letzte = msgs[msgs.length - 1]; if (!letzte) continue;
-      const h = letzte.payload?.headers || [];
-      const text = msgs.map((m: Any) => `[${kopf(m.payload?.headers, 'Date')}] ${kopf(m.payload?.headers, 'From')}: ${textTeil(m.payload).slice(0, 1500)}`).join('\n\n');
-      aus.push({ thread_id: t.id, message_id: letzte.id, von: kopf(h, 'From'), an: kopf(h, 'To') + (kopf(h, 'Cc') ? ', ' + kopf(h, 'Cc') : ''), betreff: kopf(h, 'Subject'), datum: new Date(Number(letzte.internalDate || Date.now())).toISOString(),
-        text, snippet: th.snippet || '', gesendet: (letzte.labelIds || []).includes('SENT'), labels: letzte.labelIds || [], quelle_art: 'mail' });
+      if (!th.messages?.length) continue;
+      const m = threadQuelle({ ...th, id: t.id });
+      if (!await schonDa(quellRef(m))) aus.push(m);
     }
     return aus;
   }
@@ -165,9 +222,26 @@ export function laufModul(deps: { admin: Any; json: (b: Any, s?: number) => Resp
     for (const tab of ['hh_feed_partner', 'hh_feed_habitate']) {
       const { data, error } = await admin.from(tab).select('happened_at,platform,kind,title,body,ref_table,ref_id,url,who').gt('happened_at', seit.toISOString()).lte('happened_at', bis.toISOString()).order('happened_at', { ascending: false }).limit(max);
       if (error) throw new LaufFehler(`${tab}: ${error.message}`, 500);
-      for (const f of (data || []) as Any[]) aus.push({ thread_id: `feed:${f.platform || tab}:${f.ref_table || ''}:${f.ref_id || ''}`, message_id: String(Date.parse(f.happened_at) || ''), von: `${f.platform || tab} (${f.who || 'Plattform'})`, an: 'Kompass', betreff: f.title || f.kind || tab, datum: f.happened_at, text: f.body || '', gesendet: false, quelle_art: 'plattform', url: f.url || null });
+      for (const f of (data || []) as Any[]) aus.push(feedQuelle(tab, f));
     }
     return aus.slice(0, max);
+  }
+  function feedQuelle(tab: string, f: Any): Any {
+    return { thread_id: `feed:${f.platform || tab}:${f.ref_table || ''}:${f.ref_id || ''}`, message_id: String(Date.parse(f.happened_at) || ''), von: `${f.platform || tab} (${f.who || 'Plattform'})`, an: 'Kompass', betreff: f.title || f.kind || tab, datum: f.happened_at, text: f.body || '', gesendet: false, quelle_art: 'plattform', url: f.url || null,
+      feed_tabelle: tab, platform: f.platform || '', ref_table: f.ref_table || '', ref_id: f.ref_id || '' };
+  }
+  async function wiederQuelle(postfach: string, q: Any): Promise<Any> {
+    let m: Any;
+    if (q.art === 'mail') m = threadQuelle(await gmailGet(postfach, `threads/${encodeURIComponent(q.thread_id)}?format=full`), q.message_id);
+    else {
+      if (!['hh_feed_partner','hh_feed_habitate'].includes(q.feed_tabelle)) throw new LaufFehler('Unzulässige Feedquelle', 400);
+      const { data, error } = await admin.from(q.feed_tabelle).select('happened_at,platform,kind,title,body,ref_table,ref_id,url,who')
+        .eq('happened_at', q.datum).eq('platform', q.platform).eq('ref_table', q.ref_table).eq('ref_id', q.ref_id).limit(2);
+      if (error || data?.length !== 1) throw new LaufFehler('Reservierter Feedstand nicht eindeutig verfügbar', 409);
+      m = feedQuelle(q.feed_tabelle, data[0]);
+    }
+    if ((await quellMetadaten(m, false)).hash !== q.hash) throw new LaufFehler('Reservierte Quellfassung verändert', 409);
+    return m;
   }
 
   /* ---- Kontext: aktive Vorhaben mit offenen Punkten (im Rückblick auch Punkte, die seit `kontextAb` erledigt wurden), gesperrte Punkte ---- */
@@ -244,10 +318,11 @@ Regeln:
     let quelle = 'nutzlast';
     let cursorNeu: string | null = null;
     let mehrMails = false;
+    let neueMails: Any[] = [];
     if (fixtures) {
       postfach = postfach || 'fixtures';
       if (postfach !== 'fixtures' && !erlaubt.includes(postfach)) throw new LaufFehler('postfach nicht erlaubt');   // Runde 1, Befund 2
-      mails = t.mails.slice(0, batch).map((m: Any) => ({ ...m, quelle_art: m.quelle_art === 'plattform' ? 'plattform' : 'mail' }));
+      mails = t.mails.slice(0, batch).map((m: Any) => ({ ...m, _versuch: null, quelle_art: m.quelle_art === 'plattform' ? 'plattform' : 'mail' }));
     } else {
       quelle = 'gmail';
       if (!postfach) {
@@ -256,21 +331,34 @@ Regeln:
         postfach = [...erlaubt].sort((a: string, b: string) => String(c.get(a) || '').localeCompare(String(c.get(b) || '')))[0] || '';
       }
       if (!postfach || !erlaubt.includes(postfach)) throw new LaufFehler('postfach nicht erlaubt (nur die eingestellten Postfächer)');
-      const { data: cur } = await admin.from('hh_lauf_cursor').select('bis_at,rest_bis').eq('postfach', postfach).maybeSingle();
-      const seit = t.after ? new Date(t.after) : new Date(cur?.bis_at ? Date.parse(cur.bis_at) - 3600e3 : Date.now() - (e.fenster_stunden || 26) * 3600e3);
-      /* Runde 2, Befund 1: war der letzte Stapel voll, liegt die obere Grenze des ungelesenen Rests in rest_bis; der Tick liest erst darunter weiter. */
-      const rest = !t.after && !t.before && cur?.rest_bis ? new Date(cur.rest_bis) : null;
-      const bisD = t.before ? new Date(t.before) : (rest || new Date());
-      /* Hauptpostfach ohne Werbung, Soziales, Benachrichtigungen und Foren (GitHub, Netlify, Stripe, Newsletter); Einwurf-Mails eigens; XCeed-Berichte über die Plus-Adresse. */
-      const zeit = `after:${Math.floor(seit.getTime() / 1000)} before:${Math.floor(bisD.getTime() / 1000) + 1}`;
-      const schonDa = async (prefix: string) => { const { data } = await admin.from('hh_lauf_protokoll').select('modus,ausgefuehrt,quelle_ref').like('quelle_ref', prefix + '%'); return ((data || []) as Any[]).some((x: Any) => x.ausgefuehrt || x.modus === modus); };
-      const haupt = await gmailMails(postfach, `${zeit} -category:promotions -category:social -category:updates -category:forums ${EINWURF.map(x => '-to:' + x).join(' ')}`, batch, schonDa);
-      mails = haupt; mehrMails = !!haupt.mehr;
-      const einwurfAdresse = EINWURF.find(x => x.startsWith(postfach.split('@')[0] + '+')) || null;
-      if (einwurfAdresse && mails.length < batch) { const x = await gmailMails(postfach, `${zeit} to:${einwurfAdresse}`, batch - mails.length); mails.push(...x.filter(m => !mails.some(y => y.thread_id === m.thread_id))); }
-      if (/^alex/i.test(postfach) && mails.length < batch) { const x = await gmailMails(postfach, `${zeit} to:alex+xceed@wildemoehre.org`, batch - mails.length); mails.push(...x.filter(m => !mails.some(y => y.thread_id === m.thread_id))); }
-      if (postfach === erlaubt[0] && mails.length < batch) mails.push(...await feedQuellen(seit, bisD, batch - mails.length));
-      cursorNeu = t.after || t.before ? null : (rest ? cur.bis_at : new Date().toISOString());
+      if (modus !== 'probe' && !t.after && !t.before) {
+        const offen = await rpc('hh_lauf_versuch_offen', { p_postfach: postfach, p_modus: modus, p_limit: batch });
+        mails = (offen || []).map((v: Any) => ({ _versuch: v, datum: v.quelle.datum }));
+      }
+      if (mails.length < batch) {
+        const { data: cur } = await admin.from('hh_lauf_cursor').select('bis_at,rest_bis').eq('postfach', postfach).maybeSingle();
+        const seit = t.after ? new Date(t.after) : new Date(cur?.bis_at ? Date.parse(cur.bis_at) - 3600e3 : Date.now() - (e.fenster_stunden || 26) * 3600e3);
+        /* Runde 2, Befund 1: war der letzte Stapel voll, liegt die obere Grenze des ungelesenen Rests in rest_bis; der Tick liest erst darunter weiter. */
+        const rest = !t.after && !t.before && cur?.rest_bis ? new Date(cur.rest_bis) : null;
+        const bisD = t.before ? new Date(t.before) : (rest || new Date());
+        /* Hauptpostfach ohne Werbung, Soziales, Benachrichtigungen und Foren (GitHub, Netlify, Stripe, Newsletter); Einwurf-Mails eigens; XCeed-Berichte über die Plus-Adresse. */
+        const zeit = `after:${Math.floor(seit.getTime() / 1000)} before:${Math.floor(bisD.getTime() / 1000) + 1}`;
+        const schonDa = async (ref: string) => {
+          if (mails.some(m => m._versuch?.quelle_ref === ref)) return true;
+          const { data, error } = await admin.from('hh_lauf_protokoll').select('modus,ausgefuehrt').eq('quelle_ref', ref);
+          if (error) throw error;
+          // Fehler werden ausschließlich über den atomaren Versuchsnachweis wiederaufgenommen.
+          return ((data || []) as Any[]).some((x: Any) => x.ausgefuehrt || x.modus === modus);
+        };
+        const haupt = await gmailMails(postfach, `${zeit} -category:promotions -category:social -category:updates -category:forums ${EINWURF.map(x => '-to:' + x).join(' ')}`, batch - mails.length, schonDa);
+        mails.push(...haupt); mehrMails = !!haupt.mehr;
+        const einwurfAdresse = EINWURF.find(x => x.startsWith(postfach.split('@')[0] + '+')) || null;
+        if (einwurfAdresse && mails.length < batch) { const x = await gmailMails(postfach, `${zeit} to:${einwurfAdresse}`, batch - mails.length, schonDa); mails.push(...x.filter(m => !mails.some(y => !y._versuch && quellRef(y) === quellRef(m)))); }
+        if (/^alex/i.test(postfach) && mails.length < batch) { const x = await gmailMails(postfach, `${zeit} to:alex+xceed@wildemoehre.org`, batch - mails.length, schonDa); mails.push(...x.filter(m => !mails.some(y => !y._versuch && quellRef(y) === quellRef(m)))); }
+        if (postfach === erlaubt[0] && mails.length < batch) mails.push(...await feedQuellen(seit, bisD, batch - mails.length));
+        cursorNeu = t.after || t.before ? null : (rest ? cur.bis_at : new Date().toISOString());
+        neueMails = mails.filter(m => !m._versuch);
+      }
     }
     const person = /^lea/i.test(postfach) ? 'Lea' : 'Alex';
     const kontextAb = t.after ? new Date(t.after).toISOString() : (t.kontext_ab ? new Date(t.kontext_ab).toISOString() : null);
@@ -278,18 +366,32 @@ Regeln:
     const bySlug = new Map<string, Any>(liste.map((v: Any) => [v.slug, v]));
     const zusammen: Record<string, number> = { geprueft: 0, erledigt: 0, vorschlag: 0, kandidat: 0, einwurf: 0, unklar: 0, gedeckelt: 0, gesperrt: 0, uebersprungen: 0, nichts: 0, fehler: 0 };
     const zeilen: Any[] = [];
-    for (const m of mails) {
-      const ref = `${m.quelle_art === 'plattform' ? 'feed' : 'mail'}:${txt(m.thread_id, 80) || 'x'}:${txt(m.message_id, 80) || 'x'}`;
+    for (let m of mails) {
+      const ref = m._versuch?.quelle_ref || quellRef(m);
       /* Runde 1, Befund 4: ein Probelauf sperrt nichts; übersprungen wird nur, was im selben Modus schon protokolliert oder tatsächlich ausgeführt ist. */
-      const { data: schon } = await admin.from('hh_lauf_protokoll').select('modus,ausgefuehrt').eq('quelle_ref', ref);
-      if ((schon || []).some((x: Any) => x.ausgefuehrt || x.modus === modus)) { zusammen.uebersprungen++; continue; }
+      let versuch: Any = null;
+      if (modus === 'probe') {
+        const { data: schon, error } = await admin.from('hh_lauf_protokoll').select('modus,ausgefuehrt').eq('quelle_ref', ref);
+        if (error) throw error;
+        if ((schon || []).some((x: Any) => x.ausgefuehrt || x.modus === modus)) { zusammen.uebersprungen++; continue; }
+      } else {
+        versuch = await rpc('hh_lauf_versuch_start', { p_postfach: postfach, p_ref: ref, p_modus: modus, p_quelle: m._versuch?.quelle || await quellMetadaten(m, fixtures) });
+        if (!versuch?.reserviert) { zusammen.uebersprungen++; continue; }
+      }
+      const vorSchreiben = async () => { if (versuch) await rpc('hh_lauf_versuch_schreiben', { p_token: versuch.token }); };
       let zeile: Any = { run_id: runId, modus, postfach, quelle_art: m.quelle_art === 'plattform' ? 'plattform' : 'mail', quelle_ref: ref, punkt_id: null, vorhaben_id: null, stufe: 'keine', aktion: 'nichts', beleg: null, ausgefuehrt: false, quelle_at: m.datum && !isNaN(Date.parse(m.datum)) ? new Date(m.datum).toISOString() : null };
+      zeile.versuch = versuch?.versuch || 0;
       try {
+        if (m._versuch) {
+          m = await wiederQuelle(postfach, m._versuch.quelle);
+          if (quellRef(m) !== ref) throw new LaufFehler('Reservierte Quellenkennung verändert', 409);
+          zeile.quelle_art = m.quelle_art;
+        }
         if (istEinwurfMail(m)) {
           /* Regel D des Abgleichs: Einwurf-Mails werden Einwürfe mit Vorschlag (Einwurf-Weg der Akte). */
           zeile.quelle_art = 'einwurf'; zeile.beleg = 'Einwurf aus Mail';
           if (modus === 'probe' || !deps.einwurfAnlegen || fixtures) { zeile.aktion = 'uebersprungen'; if (fixtures && modus !== 'probe') zeile.beleg = 'Einwurf aus der Nutzlast: nicht angelegt (Runde 2, Befund 4)'; }
-          else { const ew = await deps.einwurfAnlegen(mailText(m, 2000), person, `${ref}:einwurf`, 'mail'); zeile.aktion = ew?.doppelt ? 'uebersprungen' : 'nichts'; zeile.ausgefuehrt = !ew?.doppelt; zusammen.einwurf += ew?.doppelt ? 0 : 1; }
+          else { await vorSchreiben(); const ew = await deps.einwurfAnlegen(mailText(m, 2000), person, `${ref}:einwurf`, 'mail'); zeile.aktion = ew?.doppelt ? 'uebersprungen' : 'nichts'; zeile.ausgefuehrt = !ew?.doppelt; zusammen.einwurf += ew?.doppelt ? 0 : 1; }
         } else {
           zusammen.geprueft++;
           const roh = await einordnen(m, liste, e.modell, person);
@@ -311,10 +413,12 @@ Regeln:
           const darfSchreiben = modus !== 'probe' && (!fixtures || /\(Test\)/.test(String(vh?.title || '')));
           if (modus !== 'probe' && fixtures && !darfSchreiben && ['erledigt', 'vorschlag', 'kandidat'].includes(aktion)) { zeile.aktion = 'uebersprungen'; zeile.beleg = 'Quelle aus der Nutzlast außerhalb des Probelaufs: nicht geschrieben'; }
           else if (darfSchreiben && (aktion === 'vorschlag' || aktion === 'kandidat')) {
+            await vorSchreiben(); // Auch die Reservierung des Tagesdeckels ist bereits eine Schreibwirkung.
             const frei = await rpc('hh_lauf_sichtung', { p_tag: heute, p_n: 1 });
             if (Number(frei) < 1) zeile.aktion = 'gedeckelt';
           }
           if (darfSchreiben && zeile.aktion === 'erledigt') {
+            await vorSchreiben();
             /* Runde 1, Befund 7: Abschluss und Beleg in einer Transaktion (hh_lauf_erledigt). */
             await rpc('hh_lauf_erledigt', { p_punkt: punkt.id, p_ref: ref, p_beleg: `Erledigt (Lauf): ${beleg || 'Beleg in der Quelle'}`, p_url: link, p_happened: m.datum || new Date().toISOString(), p_art: m.quelle_art === 'plattform' ? 'plattform' : 'mail' });
             zeile.ausgefuehrt = true;
@@ -330,8 +434,9 @@ Regeln:
           }
         }
       } catch (err) {
-        zeile.aktion = 'fehler'; zeile.beleg = txt((err as Error).message, 600);
+        zeile.aktion = 'fehler'; zeile.beleg = `Verarbeitung fehlgeschlagen (${err instanceof LaufFehler ? err.status : 500}); keine Quelldaten im Fehlerprotokoll.`;
       }
+      if (versuch) await rpc('hh_lauf_versuch_ende', { p_token: versuch.token, p_ergebnis: zeile.aktion === 'fehler' ? 'fehler' : zeile.aktion === 'gedeckelt' ? 'gedeckelt' : 'fertig' });
       zusammen[zeile.aktion] = (zusammen[zeile.aktion] || 0) + 1;
       if (zeile.stufe === 'unklar') zusammen.unklar++;
       await schreibe('hh_lauf_protokoll', zeile, 'schluessel');
@@ -340,7 +445,7 @@ Regeln:
     if (cursorNeu && modus !== 'probe') {
       /* Voller Stapel: die älteste gelesene Mail wird obere Grenze des Rests (nächster Tick liest darunter); sonst ist das Fenster abgeschlossen. */
       const voll = mehrMails;   // Gmail hätte weitere Treffer im Fenster
-      const aeltestes = voll ? mails.map(m => String(m.datum || '')).filter(Boolean).sort()[0] : null;
+      const aeltestes = voll ? neueMails.map(m => String(m.datum || '')).filter(Boolean).sort()[0] : null;
       const { error } = await admin.from('hh_lauf_cursor').upsert({ postfach, bis_at: cursorNeu, rest_bis: voll && aeltestes ? aeltestes : null, updated_at: new Date().toISOString() }, { onConflict: 'postfach' });
       if (error) throw new LaufFehler('Cursor: ' + error.message, 500);
     }
@@ -350,7 +455,9 @@ Regeln:
     if (modus !== 'probe' && !fixtures) brief = await rueckkehrBriefe(e.modell).catch((err: Error) => ({ fehler: err.message }));
     /* Runde 1, Befund 16: im Probelauf nur Protokoll, kein letzter Lauf, kein Ticker. */
     if (modus !== 'probe') {
-      await admin.from('hh_lauf_einstellungen').update({ letzter_lauf_at: new Date().toISOString(), letzter_fehler: zusammen.fehler ? `${zusammen.fehler} Fehler im Lauf ${runId}` : null, updated_at: new Date().toISOString() }).eq('id', 1);
+      const lage = await versuchLage();
+      const hinweis = lage.wirkung_offen || lage.erschoepft ? `Offen zur Klärung: ${lage.wirkung_offen} Schreibausgänge, ${lage.erschoepft} ausgeschöpfte Quellen.` : null;
+      await admin.from('hh_lauf_einstellungen').update({ letzter_lauf_at: new Date().toISOString(), letzter_fehler: hinweis || (zusammen.fehler ? `${zusammen.fehler} Fehler im Lauf ${runId}` : null), updated_at: new Date().toISOString() }).eq('id', 1);
       if (mails.length && !fixtures) {
         const { data: tagz } = await admin.from('hh_lauf_protokoll').select('aktion,created_at').gte('created_at', new Date(Date.now() - 36 * 3600e3).toISOString());
         const z: Record<string, number> = {}; for (const r of (tagz || []) as Any[]) if (berlinTag(r.created_at) === heute) z[r.aktion] = (z[r.aktion] || 0) + 1;
@@ -453,7 +560,7 @@ Regeln:
       { kennung: 'c', text: 'Entscheidungsliste unter 15 offenen Einträgen', wert: offen || 0, ziel: 15, einheit: '', ok: (offen || 0) < 15 },
       { kennung: 'd', text: `Höchstens ${e.deckel_tag || 5} Sichtungen am Tag (höchster Tag, ${tageUeber} Tage darüber)`, wert: sichtMax, ziel: e.deckel_tag || 5, einheit: '', ok: tageUeber === 0 },
     ];
-    return { einstellungen: e, gmail_konfiguriert: !!(Deno.env.get('GOOGLE_SA_JSON') || '').trim(), ki_konfiguriert: !!Deno.env.get('ANTHROPIC_API_KEY'), cron: cron?.data ?? null, wochen: Object.values(W).sort((a: Any, b: Any) => String(b.woche).localeCompare(String(a.woche))), letzte: ((pr.data || []) as Any[]).slice(0, 30), bilanz, kriterien };
+    return { einstellungen: e, versuche: await versuchLage(), gmail_konfiguriert: !!(Deno.env.get('GOOGLE_SA_JSON') || '').trim(), ki_konfiguriert: !!Deno.env.get('ANTHROPIC_API_KEY'), cron: cron?.data ?? null, wochen: Object.values(W).sort((a: Any, b: Any) => String(b.woche).localeCompare(String(a.woche))), letzte: ((pr.data || []) as Any[]).slice(0, 30), bilanz, kriterien };
   }
 
   async function gmailProbe(t: Any) {

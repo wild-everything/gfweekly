@@ -31,6 +31,21 @@ jobs:
       - name: Kontrast der Token-Zone
         run: python3 pruefung/kontrast.py
 
+  lauf:
+    name: Lauf Quellenanker und Fehlerversuche
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Isoliertes PostgreSQL installieren
+        run: npm install --prefix /tmp/kompass-lauf-test --ignore-scripts --no-audit --no-fund @electric-sql/pglite@0.5.14
+      - name: Quellenanker, Versuche und Schutzregeln
+        env:
+          PGLITE_MODUL: file:///tmp/kompass-lauf-test/node_modules/@electric-sql/pglite/dist/index.js
+        run: node --experimental-strip-types --test pruefung/lauf-sicherheit.test.mjs
+
   oberflaeche:
     name: Oberfläche (Schirme und Bedienung)
     runs-on: ubuntu-latest
