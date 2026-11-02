@@ -1,6 +1,6 @@
 #!/bin/zsh
 # Abnahme des Kompasses: Tokens, Farben, Kontrast, Matrix, Schirme, Bedienung. Bricht beim ersten Fehler ab.
-# Aufruf aus dem Repo:  PLAYWRIGHT_MODUL=<pfad>/node_modules/playwright/index.mjs TS_BASIS=file://<pfad>/x.mjs ./pruefung/abnahme.sh [zielordner]
+# Aufruf aus dem Repo: PLAYWRIGHT_MODUL=<pfad>/node_modules/playwright/index.mjs TS_BASIS=file://<pfad>/typescript.js PGLITE_MODUL=<pfad>/node_modules/@electric-sql/pglite/dist/index.js DENO_BIN=<pfad>/deno ./pruefung/abnahme.sh [zielordner]
 set -e
 set -o pipefail
 cd "$(dirname "$0")/.."
@@ -52,6 +52,9 @@ node pruefung/entscheidungen-probe.mjs | tail -1
 echo "\n== Stufe 2: ein Behälter (Rechenregeln, Navigation; Wirkung mit GF_PW) =="
 node pruefung/stufe2-probe.mjs | tail -1
 
+echo "\n== Lauf: Quellenanker und Fehlerversuche (isoliertes PostgreSQL, keine Produktionswirkung) =="
+node --experimental-strip-types --test pruefung/lauf-sicherheit.test.mjs
+
 echo "\n== Wächter (statische Prüfungen) =="
 WAECHTER_OHNE_FRISCHE=1 node pruefung/waechter.mjs
 
@@ -67,7 +70,7 @@ cat > pruefung/letzte-abnahme.json <<JSON
   "stand": "$STAND",
   "commit": "$(git rev-parse HEAD)",
   "datum": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "laeufe": ["tokens", "farbscan", "kontrast", "matrix", "schirme (Oberfläche)", "bedienung (Oberfläche)", "kommunikation", "organisationsentscheidungen", "webstandard (Oberfläche)", "verkauf (Rechenregeln)", "entscheidungen (Rechenregeln)", "stufe 2 (Rechenregeln, Navigation)", "waechter"],
+  "laeufe": ["tokens", "farbscan", "kontrast", "matrix", "schirme (Oberfläche)", "bedienung (Oberfläche)", "kommunikation", "organisationsentscheidungen", "webstandard (Oberfläche)", "verkauf (Rechenregeln)", "entscheidungen (Rechenregeln)", "stufe 2 (Rechenregeln, Navigation)", "Lauf (isoliertes PostgreSQL)", "waechter"],
   "ungeprueft": "Wirkung in der Datenbank, Asana-Lebenszyklus, Nebenläufigkeit, verborgene Oberflächenteile"
 }
 JSON
